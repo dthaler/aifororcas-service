@@ -1,0 +1,63 @@
+# For documentation on the github environment, see
+# https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners
+#
+# For documentation on the syntax of this file, see
+# https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
+---
+name: CPP CI
+
+on:
+  pull_request:
+
+concurrency:
+  # Cancel any CI/CD workflow currently in progress for the same PR.
+  # Allow running concurrently with any other commits.
+  group: build-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build_windows:
+    permissions:
+      actions: write  # for fkirc/skip-duplicate-actions to skip or stop workflow runs
+      contents: read  # for actions/checkout to fetch code
+    strategy:
+      matrix:
+        configurations: [Debug, Release]
+    runs-on: windows-latest
+    env:
+      # Configuration type to build.  For documentation on how build matrices work, see
+      # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+      BUILD_CONFIGURATION: ${{matrix.configurations}}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@df199fb7be9f65074067a9eb93f12bb4c5547cf2  # v2.13.3
+        with:
+          egress-policy: audit
+
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@f75f66ce1886f00957d99748a42c724f4330bdcf  # v5.3.1
+        with:
+          cancel_others: 'false'
+          paths_ignore: '["**.md"]'
+
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
+        if: steps.skip_check.outputs.should_skip != 'true'
+        with:
+          submodules: 'recursive'
+
+      - name: Build
+        if: steps.skip_check.outputs.should_skip != 'true'
+        run: |
+          dotnet build AIForOrcasService.sln /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform="Any CPU"
+
+      - name: Test
+        if: steps.skip_check.outputs.should_skip != 'true'
+        env:
+          AZURE_COSMOS_CONNECTIONSTRING: ${{secrets.AZURE_COSMOS_CONNECTIONSTRING}}
+          AZURE_COSMOS_DATABASENAME: ${{secrets.AZURE_COSMOS_DATABASENAME}}
+        run: |
+          dotnet test --no-build --verbosity normal --configuration ${{env.BUILD_CONFIGURATION}} --property:Platform="Any CPU"
