@@ -3,7 +3,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-public class FastAIModel
+public class FastAIModel : IWhalecallClassificationModel
 {
     private readonly double _threshold;
     private readonly int _minNumPositiveCallsThreshold;

@@ -268,20 +268,25 @@ public class Program
 
         // Model instantiation (assumes the concrete model classes exist in the project).
         // The project already includes an Inferencer; adapt names if necessary.
-        object? whalecallClassificationModel = null;
+        IWhalecallClassificationModel? whalecallClassificationModel = null;
         try
         {
+#if false
             if (string.Equals(config.ModelType, "AudioSet", StringComparison.OrdinalIgnoreCase))
             {
                 // OrcaDetectionModel(modelPath, threshold=model_local_threshold, min_num_positive_calls_threshold=model_global_threshold)
                 whalecallClassificationModel = Activator.CreateInstance(Type.GetType("OrcaDetectionModel, Inferencer") ?? Type.GetType("OrcaDetectionModel"), config.ModelPath, config.ModelLocalThreshold ?? 0.0, config.ModelGlobalThreshold ?? 0.0);
             }
-            else if (string.Equals(config.ModelType, "FastAI", StringComparison.OrdinalIgnoreCase))
+            else
+#endif
+            if (string.Equals(config.ModelType, "FastAI", StringComparison.OrdinalIgnoreCase))
             {
-                // FastAIModel(model_path=model_path, model_name=model_name, threshold=model_local_threshold, min_num_positive_calls_threshold=model_global_threshold, export_onnx=args.export_onnx)
-                // We don't have an explicit export_onnx flag here; if needed add to config or args.
-                whalecallClassificationModel = Activator.CreateInstance(Type.GetType("FastAIModel, Inferencer") ?? Type.GetType("FastAIModel"),
-                    config.ModelPath, config.ModelName, config.ModelLocalThreshold ?? 0.0, config.ModelGlobalThreshold ?? 0.0, false);
+                whalecallClassificationModel = new FastAIModel(
+                    config.ModelPath,
+                    config.ModelName,
+                    config.ModelLocalThreshold ?? 0.0,
+                    config.ModelGlobalThreshold ?? 0.0,
+                    false);
             }
             else
             {
