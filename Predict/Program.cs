@@ -282,11 +282,10 @@ public class Program
             if (string.Equals(config.ModelType, "FastAI", StringComparison.OrdinalIgnoreCase))
             {
                 whalecallClassificationModel = new FastAIModel(
-                    config.ModelPath,
-                    config.ModelName,
+                    config.ModelPath ?? "./model",
+                    config.ModelName ?? "model.onnx",
                     config.ModelLocalThreshold ?? 0.0,
-                    config.ModelGlobalThreshold ?? 0.0,
-                    false);
+                    config.ModelGlobalThreshold ?? 0.0);
             }
             else
             {
@@ -441,18 +440,7 @@ public class Program
                 string? spectrogramPath = null;
                 try
                 {
-                    var svType = Type.GetType("SpectrogramVisualizer");
-                    var writeMethod = svType?.GetMethod("WriteSpectrogram");
-                    if (writeMethod != null)
-                    {
-                        spectrogramPath = writeMethod.Invoke(null, new object?[] { clipPath }) as string;
-                    }
-                    else
-                    {
-                        // fallback: create a placeholder spectrogram path (not functional)
-                        spectrogramPath = Path.ChangeExtension(clipPath, ".png");
-                        File.WriteAllText(spectrogramPath, "spectrogram placeholder");
-                    }
+                    spectrogramPath = SpectrogramVisualizer.WriteSpectrogram(clipPath);
                 }
                 catch (Exception ex)
                 {
@@ -465,26 +453,21 @@ public class Program
                 {
                     try
                     {
-                        // Try to call Predict(string) returning a dictionary-like object
-                        var predictMethod = whalecallClassificationModel.GetType().GetMethod("Predict");
-                        if (predictMethod != null)
+                        IDictionary<string, object> raw = whalecallClassificationModel.Predict(clipPath);
+                        // Try to convert to IDictionary<string, object>
+                        if (raw is IDictionary<string, object> dict)
                         {
-                            var raw = predictMethod.Invoke(whalecallClassificationModel, new object?[] { clipPath });
-                            // Try to convert to IDictionary<string, object>
-                            if (raw is IDictionary<string, object> dict)
+                            predictionResults = dict;
+                        }
+                        else
+                        {
+                            // attempt reflection-based mapping of properties
+                            var prs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var p in raw.GetType().GetProperties())
                             {
-                                predictionResults = dict;
+                                prs[p.Name] = p.GetValue(raw)!;
                             }
-                            else
-                            {
-                                // attempt reflection-based mapping of properties
-                                var prs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-                                foreach (var p in raw.GetType().GetProperties())
-                                {
-                                    prs[p.Name] = p.GetValue(raw)!;
-                                }
-                                predictionResults = prs;
-                            }
+                            predictionResults = prs;
                         }
                     }
                     catch (Exception ex)
