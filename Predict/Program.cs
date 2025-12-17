@@ -333,20 +333,13 @@ public class Program
         }
 
         // Instantiate HLS stream
-        object? hlsStream = null;
+        IHlsStream? hlsStream = null;
         try
         {
             if (string.Equals(config.HlsStreamType, "LiveHLS", StringComparison.OrdinalIgnoreCase))
             {
                 var url = "https://s3-us-west-2.amazonaws.com/audio-orcasound-net/" + config.HlsHydrophoneId;
-                // HlsStream(url, pollingInterval, localDir)
-                var hlsType = Type.GetType("HlsStream, Inferencer") ?? Type.GetType("HlsStream") ?? Type.GetType("HlsStream, Worker");
-                if (hlsType == null)
-                {
-                    logger.LogError("HlsStream type not found in loaded assemblies (looked for HlsStream, HlsStream,Worker and HlsStream,Inferencer). Aborting.");
-                    Environment.Exit(1);
-                }
-                hlsStream = Activator.CreateInstance(hlsType, url, config.HlsPollingInterval, localDir);
+                hlsStream = new HlsStream(url, config.HlsPollingInterval, localDir);
             }
             else if (string.Equals(config.HlsStreamType, "DateRangeHLS", StringComparison.OrdinalIgnoreCase))
             {
@@ -377,8 +370,7 @@ public class Program
                 var endUnix = new DateTimeOffset(endOffset).ToUnixTimeSeconds();
 
                 var url = "https://s3-us-west-2.amazonaws.com/audio-orcasound-net/" + config.HlsHydrophoneId;
-                // DateRangeHlsStream(url, pollingInterval, startUnix, endUnix, localDir, false)
-                hlsStream = Activator.CreateInstance(Type.GetType("DateRangeHlsStream") ?? Type.GetType("DateRangeHLSStream, Worker"), url, config.HlsPollingInterval, startUnix, endUnix, localDir, false);
+                hlsStream = new DateRangeHlsStream(url, config.HlsPollingInterval, startUnix, endUnix, localDir, false);
             }
             else
             {
@@ -400,15 +392,13 @@ public class Program
         {
             // Try to call hlsStream.IsStreamOver() via reflection
             bool isOver = false;
-            var isStreamOverMethod = hlsStream?.GetType().GetMethod("IsStreamOver");
-            if (isStreamOverMethod != null)
+            if (hlsStream != null)
             {
-                isOver = (bool)isStreamOverMethod.Invoke(hlsStream, null)!;
+                isOver = hlsStream.IsStreamOver();
             }
             else
             {
-                // If method not found, assume not over and continue (or break to avoid infinite loop)
-                logger.LogWarning("HLS stream does not implement IsStreamOver(). Breaking loop to avoid infinite run.");
+                logger.LogWarning("HLS stream is not instantiated. Breaking loop to avoid infinite run.");
                 break;
             }
 
@@ -423,43 +413,21 @@ public class Program
             }
             iterationCount++;
 
-            // Call GetNextClip(currentClipEndTime) -> returns (string clipPath, DateTime startTimestamp, DateTime newCurrentClipEndTime)
-            var getNextClipMethod = hlsStream.GetType().GetMethod("GetNextClip");
-            if (getNextClipMethod == null)
-            {
-                logger.LogError("HLS stream does not implement GetNextClip(DateTime). Aborting.");
-                break;
-            }
-
-            var nextClipResult = getNextClipMethod.Invoke(hlsStream, new object?[] { currentClipEndTime });
-            if (nextClipResult == null)
+            var nextClipResult = hlsStream.GetNextClip(currentClipEndTime);
+            if (nextClipResult.clipPath == null)
             {
                 logger.LogWarning("GetNextClip returned null result.");
                 break;
             }
 
-            // Support different return shapes: tuple-like or a simple object with properties.
-            string? clipPath = null;
+            string? clipPath = nextClipResult.clipPath;
             DateTime startTimestamp = DateTime.MinValue;
-            DateTime newClipEnd = currentClipEndTime;
-
-            var rt = nextClipResult.GetType();
-            var clipPathProp = rt.GetProperty("clipPath") ?? rt.GetProperty("ClipPath") ?? rt.GetProperty("Item1");
-            var startProp = rt.GetProperty("startTimestamp") ?? rt.GetProperty("StartTimestamp") ?? rt.GetProperty("Item2");
-            var newEndProp = rt.GetProperty("currentClipEndTime") ?? rt.GetProperty("CurrentClipEndTime") ?? rt.GetProperty("Item3");
-
-            if (clipPathProp != null)
+            if (!string.IsNullOrWhiteSpace(nextClipResult.startTimestamp) &&
+                DateTime.TryParse(nextClipResult.startTimestamp, null, DateTimeStyles.RoundtripKind, out var parsedStart))
             {
-                clipPath = clipPathProp.GetValue(nextClipResult) as string;
+                startTimestamp = parsedStart;
             }
-            if (startProp != null && startProp.GetValue(nextClipResult) is DateTime dt)
-            {
-                startTimestamp = dt;
-            }
-            if (newEndProp != null && newEndProp.GetValue(nextClipResult) is DateTime ndt)
-            {
-                newClipEnd = ndt;
-            }
+            DateTime newClipEnd = nextClipResult.newCurrentClipEndTime;
 
             // If clipPath is empty or null, skip processing for this iteration
             if (!string.IsNullOrWhiteSpace(clipPath))

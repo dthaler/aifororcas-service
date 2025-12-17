@@ -8,11 +8,8 @@ using System.Linq;
 using System.Net.Http;
 using System.Diagnostics;
 using System.Threading;
-using System.Threading.Tasks;
 
-// Public class named HlsStream (no namespace) so reflection calls like Type.GetType("HlsStream") can resolve it.
-// Implements a best-effort, dependency-free approximation of the Python HlsStream behavior used by the Program.
-public class HlsStream
+public class HlsStream : IHlsStream
 {
     private readonly string _streamBase;
     private readonly int _pollingInterval;
@@ -22,8 +19,6 @@ public class HlsStream
     private readonly string _hydrophoneId;
     private readonly HttpClient _http;
 
-    // Added 3-argument constructor overload so Activator.CreateInstance(...) calls that pass
-    // (string, int, string) will match. Default audioOffset is 2.
     public HlsStream(string streamBase, int pollingInterval, string wavDir)
         : this(streamBase, pollingInterval, wavDir, 2)
     {
@@ -36,19 +31,15 @@ public class HlsStream
         _wavDir = wavDir ?? throw new ArgumentNullException(nameof(wavDir));
         _audioOffset = audioOffset;
 
-        // Try derive bucket/hydrophone from streamBase similar to Python logic
-        // expected streamBase: "https://s3-us-west-2.amazonaws.com/<bucket>/<hydrophone>"
         var afterPrefix = _streamBase.Replace("https://s3-us-west-2.amazonaws.com/", "");
         var tokens = afterPrefix.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
         _s3Bucket = tokens.Length > 0 ? tokens[0] : string.Empty;
         _hydrophoneId = tokens.Length > 1 ? tokens[1] : string.Empty;
 
         _http = new HttpClient();
-        // reasonable default timeout
         _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
-    // Attempts to fetch "<streamBase>/latest.txt" and return the trimmed content (stream id) or null
     public string? GetLatestFolderTime()
     {
         try
@@ -64,13 +55,10 @@ public class HlsStream
         }
     }
 
-    // Returns (wavFilePath, clipStartIsoUtcString, newCurrentClipEndTime)
-    // Mirrors Python signature and behavior: returns nulls when not enough data or on transient failures.
     public (string? clipPath, string? startTimestamp, DateTime newCurrentClipEndTime) GetNextClip(DateTime currentClipEndTime)
     {
         try
         {
-            // Sleep until currentClipEndTime + 10s if in the future relative to now
             var now = DateTime.UtcNow;
             var timeToSleep = (currentClipEndTime - now).TotalSeconds + 10;
             if (timeToSleep > 0)
@@ -85,7 +73,6 @@ public class HlsStream
 
             var streamUrl = $"{_streamBase.TrimEnd('/')}/hls/{streamId}/live.m3u8";
 
-            // Try fetch playlist
             string playlist;
             try
             {
@@ -97,7 +84,6 @@ public class HlsStream
                 return (null, null, currentClipEndTime);
             }
 
-            // Parse m3u8: extract durations (from #EXTINF:) and segment URIs (next non-comment lines)
             var lines = playlist.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                                 .Select(l => l.Trim()).ToList();
             var segments = new List<(double duration, string uri)>();
@@ -106,11 +92,9 @@ public class HlsStream
                 var l = lines[i];
                 if (l.StartsWith("#EXTINF:", StringComparison.OrdinalIgnoreCase))
                 {
-                    // format: #EXTINF:duration,
                     var durPart = l.Substring(8).Trim().TrimEnd(',');
                     if (double.TryParse(durPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var d))
                     {
-                        // next line should be URI
                         if (i + 1 < lines.Count)
                         {
                             var next = lines[i + 1];
@@ -139,8 +123,6 @@ public class HlsStream
 
             var numSegmentsInWavDuration = (int)Math.Ceiling(_pollingInterval / targetDuration);
 
-            // compute time_since_folder_start similar to python:
-            // currentClipEndTime unix - stream_id (stream_id expected as integer seconds)
             if (!long.TryParse(streamId, out var streamFolderUnix))
             {
                 Console.WriteLine("stream id is not a unix epoch integer, aborting");
@@ -150,7 +132,6 @@ public class HlsStream
             var currentClipEndUnix = new DateTimeOffset(currentClipEndTime).ToUnixTimeSeconds();
             var timeSinceFolderStart = (double)(currentClipEndUnix - streamFolderUnix);
 
-            // compensate audio offset
             timeSinceFolderStart -= _audioOffset;
 
             if (timeSinceFolderStart < _pollingInterval + 20)
@@ -163,7 +144,6 @@ public class HlsStream
             var segmentStartIndex = minNumTotalSegmentsRequired - numSegmentsInWavDuration;
             var segmentEndIndex = segmentStartIndex + numSegmentsInWavDuration;
 
-            // nominal end time
             double endSeconds = segmentEndIndex * targetDuration + streamFolderUnix + _audioOffset;
             var endUtc = DateTimeOffset.FromUnixTimeSeconds((long)Math.Round(endSeconds)).UtcDateTime;
             var newCurrentClipEndTime = endUtc;
@@ -171,11 +151,9 @@ public class HlsStream
             if (segmentEndIndex > numTotalSegments)
                 return (null, null, newCurrentClipEndTime);
 
-            // tmp path
             var tmpPath = Path.Combine(Path.GetTempPath(), "hls_tmp_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tmpPath);
 
-            // determine baseUri from playlist url
             var baseUri = streamUrl.Substring(0, streamUrl.LastIndexOf('/') + 1);
 
             var downloadedFiles = new List<string>();
@@ -219,7 +197,6 @@ public class HlsStream
             var wavFilePath = Path.Combine(_wavDir, audioFile);
             var hlsFilePath = Path.Combine(tmpPath, hlsFile);
 
-            // concatenate downloaded .ts segments in order to hlsFilePath
             using (var outFs = File.Create(hlsFilePath))
             {
                 foreach (var segPath in downloadedFiles)
@@ -229,11 +206,10 @@ public class HlsStream
                         using var inFs = File.OpenRead(segPath);
                         inFs.CopyTo(outFs);
                     }
-                    catch { /* ignore individual segment read errors */ }
+                    catch { }
                 }
             }
 
-            // run ffmpeg to convert .ts -> .wav
             try
             {
                 RunFfmpeg(hlsFilePath, wavFilePath);
@@ -241,13 +217,11 @@ public class HlsStream
             catch (Exception e)
             {
                 Console.WriteLine("FFmpeg command failed: " + e.Message);
-                // cleanup and rethrow to preserve behavior similar to Python where ffmpeg error is raised
                 try { Directory.Delete(tmpPath, true); } catch { }
                 throw;
             }
 
-            // cleanup tmp
-            try { Directory.Delete(tmpPath, true); } catch { /* ignore */ }
+            try { Directory.Delete(tmpPath, true); } catch { }
 
             return (wavFilePath, clipStartIso + "Z", newCurrentClipEndTime);
         }
@@ -260,13 +234,9 @@ public class HlsStream
 
     public bool IsStreamOver()
     {
-        // Live stream is never over
         return false;
     }
 
-    // Helpers
-
-    // Create a readable clipname and pacific-time date similar to Python get_readable_clipname
     private static (string clipName, DateTime pacificDate) GetReadableClipName(string hydrophoneId, DateTime clipTimeUtc)
     {
         var utc = DateTime.SpecifyKind(clipTimeUtc, DateTimeKind.Utc);
@@ -294,14 +264,11 @@ public class HlsStream
         return ($"{hydrophoneId}_{clipname}", pacific);
     }
 
-    // Execute ffmpeg process to convert input.ts -> output.wav
-    // Requires ffmpeg binary available on PATH.
     private static void RunFfmpeg(string inputTs, string outputWav)
     {
         if (!File.Exists(inputTs))
             throw new FileNotFoundException("Input TS file not found", inputTs);
 
-        // Ensure output directory exists
         Directory.CreateDirectory(Path.GetDirectoryName(outputWav) ?? ".");
 
         var psi = new ProcessStartInfo
